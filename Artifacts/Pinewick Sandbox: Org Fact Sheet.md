@@ -1,0 +1,56 @@
+# Pinewick Sandbox: Org Fact Sheet
+
+**Training material.** This is what S1's org analysis would report if you pointed it at Pinewick's full sandbox for the Returns & Warranty Claims theme. Attach it wherever a Halston prompt would analyze the sandbox. Build in your own training org; nothing here exists there unless you create it.
+
+## Products in the org
+
+- **B2B Commerce (LWR)** on Experience Cloud: one store, "Pinewick Online". Custom LWCs for order history and order detail, built during the storefront project. Checkout uses a Cart Calculator extension for contract pricing and a custom payment-terms step.
+- **Salesforce Order Management**: orders flow storefront → OrderSummary → ERP. **The standard Order Management return objects (`ReturnOrder`, `ReturnOrderLineItem`) are present and unused**: no records, no automation, not on any layout.
+- **Service Cloud**: email-to-case on `support@` and `returns@`; Case has a `Type` picklist with values Order Status, Invoice, Return, Warranty, Other. Cases are worked in a single queue; no routing by branch.
+- **Experience Cloud** buyer users use a "Pinewick Buyer" profile plus a "Storefront Buyer" permission set.
+
+## Objects and fields relevant to the theme
+
+| Object | What's there | Notes |
+|---|---|---|
+| `Account` | `Account_Terms__c` (picklist: Net 30, Net 45, Card Only); `Restocking_Fee_Pct__c` (number, 2 dp); `Home_Branch__c` (lookup to `Branch__c`); `Blanket_Order_Customer__c` (checkbox) | `Restocking_Fee_Pct__c` is populated on 1,412 of 9,020 accounts. The ERP sync mapping for it exists in the integration config but is **disabled**. Values present range 0–15. |
+| `Branch__c` | 12 records. `Accepts_Hazmat_Dropoff__c` (checkbox, 9 of 12 true), `Dropoff_Email__c`, `Branch_Code__c` | Created during the storefront project for ship-from. |
+| `OrderSummary` / `OrderItemSummary` | Standard OMS. `OrderItemSummary` has custom `Ship_Date__c`, `ERP_Line_Number__c`, `Category_Code__c` (text, e.g. FST, CHM, PWR, CTL, SPO) | **No serial-number field.** `Category_Code__c` is populated from the ERP on every line. CTL = cut-to-length, SPO = special order, CHM = chemicals/hazmat, PWR = power tools. |
+| `Product2` | `Hazmat__c` (checkbox), `Serialized__c` (checkbox), `Manufacturer__c` (picklist, 41 values), `Warranty_Months__c` (number) | `Serialized__c` is true on 2,318 products, all in PWR and a pump category. `Warranty_Months__c` populated on 60% of serialized products. |
+| `Return_Request__c` | Custom object built by inside sales in 2024 for internal tracking. Fields: `Order_Number__c` (text), `RMA_Number__c` (text), `Reason__c` (picklist, 6 values that do not match the ERP's 9 codes), `Status__c` (New / Sent / Closed), `Amount__c`. 3,900 records, last created 11 days ago. One list view, one report. No automation. Tab visible to the "Inside Sales" profile only. | Actively used by two branches as a spreadsheet replacement. Nobody at IT owns it. |
+| `Case` | Standard plus `Branch__c` lookup, `Order_Number__c` (text), `Reason_Code__c` (text) | Cases with Type = Return: 2,140 in the last 12 months; Warranty: 412. |
+
+## Automation
+
+| Automation | Type | What it does | Risk |
+|---|---|---|---|
+| `Case_Auto_Assign` | Record-triggered flow on Case (after save) | Sets Owner to the queue based on `Type`; does nothing for Return or Warranty (they fall to the default queue) | Will fire on every case the new solution creates. |
+| `CaseTrigger` | Apex trigger, before/after insert and update | 2019-era; stamps `Reason_Code__c` from the email subject, sets priority; **62% test coverage**, one test class with hard-coded ids that fails in a fresh scratch org | Touches fields the new solution will set. Deploying anything that references Case will run its tests. |
+| `OrderSummary_ERP_Status` | Platform-event-triggered flow | Updates OrderSummary status from the `ERP_Order_Status__e` event published by the integration middleware | Established pattern for ERP → Salesforce status; reusable. |
+| `Restocking_Fee_Sync` | Integration mapping (middleware) | Would map ERP restock percentage → `Account.Restocking_Fee_Pct__c` | **Disabled.** Neil believes it was never enabled after UAT of the storefront project. |
+
+## Integration
+
+- **Middleware** publishes platform events for ERP order status (`ERP_Order_Status__e`) and consumes a nightly credit-memo flat file for the invoice sync. No event exists for RMA or receiving status.
+- **ERP RMA API**: synchronous REST. Request: order number, lines (ERP line number, quantity, reason code). Response: RMA number, or a validation error. Observed latency 8–20 s. **Named credential exists** (`ERP_API`) from the storefront project.
+- **ERP return-status query**: given an RMA number, returns receipt status per line and, once posted, credit memo number and amount. Not yet called from Salesforce.
+- **Carrier label service**: no existing integration. Neil has API credentials from the outbound-shipping project; labels are generated by the ERP today.
+- **Manufacturer warranty**: no integration. Three manufacturers accept CSV by email; two use web portals; the rest email with PDF.
+
+## Org health
+
+- API usage at 41% of the 24-hour limit, driven by the order sync.
+- 3 Apex classes below 75% coverage, including `CaseTriggerHandler`.
+- 14 fields on Account with no references in code, layouts, or reports.
+- No field-level security review on `Restocking_Fee_Pct__c`; it is visible to the buyer profile in the sandbox.
+- Sandbox last refreshed from production 34 days ago.
+
+## Data samples (create these in your training org)
+
+| Account | Terms | Restocking fee | Home branch | Notes |
+|---|---|---|---|---|
+| Brightline Mechanical | Net 30 | **0** (contractual) | Branch 03 (Dayton) | Blanket-order customer. Buyer: Carla Mendes. Six ship-tos. |
+| Keller Facilities Group | Net 30 | *(blank, should be 15)* | Branch 07 (Fort Wayne) | Represents the 7,600 accounts with no synced fee. |
+| Northgate Municipal Water | Net 45 | 5 | Branch 11 (Peoria) | Municipal; buyers use a restricted permission set. |
+
+Orders for Brightline: one order with lines FST (50 fittings, shipped 12 days ago), CHM (4 cases of aerosol lubricant, shipped 12 days ago), PWR (1 serialized cordless drill, shipped 40 days ago, warranty 24 months), CTL (30 ft cut hose, shipped 12 days ago), and a second FST line for the same part number (10 fittings). One blanket order with a release shipped 70 days ago.
